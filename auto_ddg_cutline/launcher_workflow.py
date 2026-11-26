@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile, mkdtemp
 from typing import Any, Literal, cast
@@ -45,6 +45,9 @@ class SavedSelection:
     report: Path | None
     run: Path | None
     can_export: bool
+    restored_checks: frozenset[int] | None = None
+    refined_report: Path | None = None
+    can_export_refined: bool = False
 
     def refinement_indices(self, checked: list[int]) -> list[int] | None:
         """Translate checked rows, or signal that a row needs a new analysis."""
@@ -96,12 +99,19 @@ def selection_run_is_complete(run: dict[str, Any]) -> bool:
     )
 
 
-def load_saved_selection(path: Path, photos: list[Path]) -> SavedSelection:
-    """Load a prior recommendation and map it to the launcher rows.
+class SelectionPlanRelocationNeeded(ValueError):
+    """Signal that the launcher should ask for the original analysis plan."""
+
+
+def load_saved_selection(
+    path: Path, photos: list[Path], *, original_plan: Path | None = None
+) -> SavedSelection:
+    """Load saved recommendations or the analyst's confirmed photo selection.
 
     Args:
-        path: The selection plan or its companion run manifest.
+        path: The analysis plan, its run manifest, or the Tier 2 snapshot.
         photos: Source photos currently displayed in the launcher.
+        original_plan: Replacement path for a moved Tier 2 source plan.
 
     Returns:
         The checked row indices, photo mapping, and available review files.
@@ -112,12 +122,14 @@ def load_saved_selection(path: Path, photos: list[Path]) -> SavedSelection:
             the current photo folder.
     """
     path = path.resolve()
+    if path.name.casefold() == TIER2_SELECTION_NAME:
+        return load_confirmed_selection(path, photos, original_plan)
     run: Path | None = None
     manifest: dict[str, Any] = {}
     if path.name.casefold() == "run.json":
         run = path
         path = path.with_name("selection-plan.json")
-    elif path.name == "selection-plan.json":
+    elif path.name.casefold() == "selection-plan.json":
         sibling: Path = path.with_name("run.json")
         if sibling.is_file():
             run = sibling
@@ -183,6 +195,107 @@ def load_saved_selection(path: Path, photos: list[Path]) -> SavedSelection:
         report=report if report.is_file() else None,
         run=run,
         can_export=run is not None and bool(plan.get("export_pairs")),
+    )
+
+
+def load_confirmed_selection(
+    path: Path, photos: list[Path], original_plan: Path | None
+) -> SavedSelection:
+    """Restore analyst checks after validating their link to the analysis.
+
+    Args:
+        path: The Tier 2 selection snapshot.
+        photos: Current launcher photo rows in display order.
+        original_plan: Optional new location of the exact analysis plan.
+
+    Returns:
+        The original recommendation, restored checks, and any completed review.
+    """
+    snapshot: dict[str, Any] = read_json(path)
+    reference: Any = snapshot.get("selection_plan")
+    expected: Any = snapshot.get("selection_plan_sha256")
+    indices: Any = snapshot.get("photo_indices")
+    rows: Any = snapshot.get("photos")
+    if (
+        snapshot.get("schema_version") != 1
+        or not isinstance(reference, str)
+        or not reference
+        or not isinstance(expected, str)
+        or len(expected) != 64
+        or not isinstance(rows, list)
+        or not isinstance(indices, list)
+        or not indices
+        or len(rows) != len(indices)
+        or any(type(index) is not int or index < 0 for index in indices)
+        or len(set(indices)) != len(indices)
+    ):
+        raise ValueError("The Tier 2 selection is invalid or incomplete.")
+
+    # Older snapshots use a relative path when saved beside their analysis.
+    plan_path: Path = original_plan or path.parent / reference
+    if (
+        not plan_path.is_file()
+        or hashlib.sha256(plan_path.read_bytes()).hexdigest() != expected
+    ):
+        error: str = (
+            "Locate the original selection-plan.json for this Tier 2 selection."
+        )
+        if original_plan is None:
+            raise SelectionPlanRelocationNeeded(error)
+        raise ValueError(
+            "The chosen analysis plan does not match the Tier 2 selection."
+        )
+    selection: SavedSelection = load_saved_selection(plan_path, photos)
+    if selection.digest != expected:
+        raise ValueError(
+            "The original analysis plan changed while loading the selection."
+        )
+    plan: dict[str, Any] = read_json(selection.plan)
+    current: dict[str, int] = {photo.name: index for index, photo in enumerate(photos)}
+    checks: set[int] = set()
+    for index, row in zip(indices, rows, strict=True):
+        if not isinstance(row, dict) or index >= len(plan["photos"]):
+            raise ValueError(
+                "The Tier 2 selection contains an invalid photo reference."
+            )
+        original: dict[str, Any] = plan["photos"][index]
+        if (row.get("name"), row.get("sha256")) != (
+            original["name"],
+            original.get("sha256"),
+        ):
+            raise ValueError(
+                "The Tier 2 photo records differ from the original analysis."
+            )
+        name: str = original["name"]
+        if name not in current:
+            raise ValueError(f"Checked photo is missing from this folder: {name}")
+        checks.add(current[name])
+
+    refined: Path | None = None
+    can_export: bool = False
+    for manifest in sorted(
+        path.parent.glob("auto-ddg-colmap-*/run.json"), reverse=True
+    ):
+        try:
+            result: dict[str, Any] = read_json(manifest)
+            preview: Path = manifest.with_name("selection-plan.html")
+            if not selection_run_is_complete(result) or not preview.is_file():
+                continue
+            refined_plan: dict[str, Any] = read_json(preview.with_suffix(".json"))
+            if not refined_plan.get("refinement") or [
+                (row["name"], row["sha256"]) for row in refined_plan["photos"]
+            ] != [(row["name"], row["sha256"]) for row in rows]:
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        refined = preview
+        can_export = bool(refined_plan.get("export_pairs"))
+        break
+    return replace(
+        selection,
+        restored_checks=frozenset(checks),
+        refined_report=refined,
+        can_export_refined=can_export,
     )
 
 

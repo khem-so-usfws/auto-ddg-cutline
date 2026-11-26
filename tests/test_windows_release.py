@@ -16,6 +16,7 @@ import pytest
 
 from auto_ddg_cutline.launcher_workflow import (
     SavedSelection,
+    SelectionPlanRelocationNeeded,
     export_review,
     load_saved_selection,
     read_tier2_proposal,
@@ -244,7 +245,7 @@ def test_release_zip_preserves_bundle_tree_and_checksum(tmp_path: Path) -> None:
     assert release_version("0.1.0-rc.1") == "0.1.0-rc.1"
     (bundle / "release.json").write_text('{"version": "0.1.3"}', encoding="utf-8")
     assert launcher_title(bundle) == "Auto-DDG Cutline 0.1.3"
-    assert launcher_title() == "Auto-DDG Cutline 0.1.5"
+    assert launcher_title() == "Auto-DDG Cutline 0.1.6-overview.4"
     with pytest.raises(argparse.ArgumentTypeError):
         release_version("../0.1.0")
 
@@ -369,6 +370,11 @@ def test_confirm_tier2_saves_added_and_dropped_photos(tmp_path: Path) -> None:
     assert data["selection_plan_sha256"] == digest
     assert json.loads(plan_path.read_bytes()) == plan
     assert list(folder.glob("*.json")) == []
+    reversed_photos: list[Path] = [folder / row["name"] for row in reversed(rows)]
+    restored: SavedSelection = load_saved_selection(saved, reversed_photos)
+    assert restored.restored_checks == frozenset({0, 2})
+    assert restored.recommended == frozenset({1, 2})
+    assert restored.refinement_indices([0, 2]) == [2, 0]
 
     # The refinement run consumes exactly the accepted photos, in their saved order.
     with patch("auto_ddg_cutline.launcher_workflow.run_colmap", return_value=0) as run:
@@ -396,6 +402,39 @@ def test_confirm_tier2_saves_added_and_dropped_photos(tmp_path: Path) -> None:
         refinement: Path = run.call_args.kwargs["refinement_selection"]
         assert refinement.parent.parent == job
         assert json.loads(refinement.read_bytes())["photos"] == [rows[0], rows[2]]
+
+    completed: Path = refinement.parent / "auto-ddg-colmap-test"
+    completed.mkdir()
+    (completed / "run.json").write_text(
+        json.dumps({"status": "complete", "output": "selection-plan"}), encoding="utf-8"
+    )
+    (completed / "selection-plan.json").write_text(
+        json.dumps(
+            {"photos": data["photos"], "refinement": True, "export_pairs": [[0, 1]]}
+        ),
+        encoding="utf-8",
+    )
+    refined_report: Path = completed / "selection-plan.html"
+    refined_report.touch()
+    restored = load_saved_selection(refinement, reversed_photos)
+    assert restored.refined_report == refined_report
+    assert restored.can_export_refined
+
+    moved: Path = tmp_path / "Moved analysis"
+    moved.mkdir()
+    moved_plan: Path = plan_path.rename(moved / plan_path.name)
+    with pytest.raises(SelectionPlanRelocationNeeded):
+        load_saved_selection(refinement, reversed_photos)
+    relocated: SavedSelection = load_saved_selection(
+        refinement, reversed_photos, original_plan=moved_plan
+    )
+    assert relocated.plan == moved_plan
+    assert relocated.restored_checks == restored.restored_checks
+    wrong: Path = tmp_path / "different.json"
+    wrong.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        load_saved_selection(refinement, reversed_photos, original_plan=wrong)
+    moved_plan.rename(plan_path)
 
     (folder / rows[2]["name"]).write_bytes(b"edited")
     changed_photo: subprocess.CompletedProcess[str] = subprocess.run(

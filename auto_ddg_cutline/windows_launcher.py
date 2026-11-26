@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable, Literal, TypeAlias
 
@@ -25,6 +25,7 @@ from .__main__ import main as cli_main
 from .launcher_workflow import (
     MANIFEST_PREFIX,
     SavedSelection,
+    SelectionPlanRelocationNeeded,
     export_review,
     load_saved_selection,
     read_json,
@@ -33,8 +34,9 @@ from .launcher_workflow import (
     save_tier2_selection,
     test_installation,
 )
-from .match_cache import legacy_checkpoint
+from .match_cache import legacy_checkpoint, match_assets
 from .selection import DEFAULT_TARGET_PHOTO_PERCENT
+from .survey_overview import build_survey_overview
 
 DeviceChoice: TypeAlias = Literal["cpu", "auto", "gpu"]
 DEVICES: dict[str, DeviceChoice] = {"Auto": "auto", "NVIDIA GPU": "gpu", "CPU": "cpu"}
@@ -266,6 +268,8 @@ def run_worker() -> int:
             manifest: Path
             folder, manifest = map(Path, sys.argv[2:])
             return export_review(folder, manifest)
+        if sys.argv[1:2] == ["--survey-overview"]:
+            return build_survey_overview(Path(sys.argv[2]))
         if sys.argv[1:2] == ["--confirm-tier2"]:
             folder_arg: str
             plan_arg: str
@@ -314,6 +318,38 @@ def run_worker() -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+
+
+class DenseReferenceDialog(simpledialog.Dialog):
+    """Choose the photo that defines the dense terrain section."""
+
+    def __init__(self, parent: tk.Misc, photos: list[str], default: str) -> None:
+        """Set up the choices before opening the modal dialog."""
+        self.photos: list[str] = photos
+        self.default: str = default
+        self.result: str | None = None
+        super().__init__(parent, title="Build dense terrain")
+
+    def body(self, master: tk.Misc) -> tk.Widget:
+        """Render the reference selector and describe the scope of the pilot."""
+        ttk.Label(
+            master,
+            text=(
+                "Choose a reference photo for one section of the survey. "
+                "COLMAP will use nearby registered views. This step requires CUDA."
+            ),
+            wraplength=440,
+        ).pack(anchor="w", pady=(0, 8))
+        self.reference: ttk.Combobox = ttk.Combobox(
+            master, values=self.photos, width=58, state="readonly"
+        )
+        self.reference.set(self.default)
+        self.reference.pack(fill="x")
+        return self.reference
+
+    def apply(self) -> None:
+        """Return the reference chosen by the analyst."""
+        self.result = self.reference.get()
 
 
 class Launcher:
@@ -477,12 +513,22 @@ class Launcher:
         for button in (self.refine_button, self.open_refined, self.export_refined):
             button.pack(side="left", padx=(0, 6))
         ttk.Label(refinement, textvariable=self.selection_count).pack(side="right")
+        options_row: ttk.Frame = ttk.Frame(outer)
+        options_row.grid(row=10, column=0, sticky="ew", pady=(5, 0))
         self.protection_option: ttk.Checkbutton = ttk.Checkbutton(
-            outer,
+            options_row,
             text="Avoid DDG polygons labeled protect_group",
             variable=self.protect_groups,
         )
-        self.protection_option.grid(row=10, column=0, sticky="w", pady=(5, 0))
+        self.protection_option.pack(side="left")
+        self.overview_button: ttk.Button = ttk.Button(
+            options_row, text="Update Survey Overview", command=self.start_overview
+        )
+        self.overview_button.pack(side="right")
+        self.dense_overview_button: ttk.Button = ttk.Button(
+            options_row, text="Build dense terrain…", command=self.start_dense_overview
+        )
+        self.dense_overview_button.pack(side="right", padx=(0, 6))
         self.editors.append(self.protection_option)
         self.update_controls()
 
@@ -699,14 +745,28 @@ class Launcher:
             return
         choice: str = filedialog.askopenfilename(
             parent=self.root,
-            title="Choose a saved run.json or selection-plan.json",
+            title="Choose run.json, selection-plan.json, or tier2-selection.json",
             initialdir=self.log_folder or self.job_dir.get(),
             filetypes=[("Saved selection", "*.json")],
         )
         if not choice:
             return
         try:
-            selection: SavedSelection = load_saved_selection(Path(choice), self.photos)
+            selection: SavedSelection
+            try:
+                selection = load_saved_selection(Path(choice), self.photos)
+            except SelectionPlanRelocationNeeded as error:
+                original: str = filedialog.askopenfilename(
+                    parent=self.root,
+                    title=str(error),
+                    initialdir=Path(choice).parent,
+                    filetypes=[("Original analysis", "*.json")],
+                )
+                if not original:
+                    return
+                selection = load_saved_selection(
+                    Path(choice), self.photos, original_plan=Path(original)
+                )
         except (OSError, ValueError, KeyError, TypeError) as error:
             self.fail(error)
             return
@@ -715,30 +775,41 @@ class Launcher:
             and set(self.checked_photos()) != self.recommended
             and not messagebox.askyesno(
                 "Replace current checks?",
-                "Load the saved recommendations over the current checks?",
+                "Replace the current checks with the saved selection?",
                 parent=self.root,
             )
         ):
             return
         self.apply_selection(selection)
         self.log_folder = selection.run.parent if selection.run is not None else None
-        status: str = (
-            f"Loaded {len(self.recommended)} recommendations from {selection.plan.name}."
-        )
+        status: str
+        if selection.restored_checks is None:
+            status = f"Loaded {len(self.recommended)} recommendations from {selection.plan.name}."
+        else:
+            status = f"Restored {len(selection.restored_checks)} checked photos from tier2-selection.json."
+            if selection.refined_report is not None:
+                status += " Refined review available."
         if any(index is None for index in selection.plan_indices):
             status += " Reanalyze before refining photos added since that run."
         self.status.set(status)
         self.update_controls()
 
     def apply_selection(self, selection: SavedSelection) -> None:
-        """Apply a validated recommendation without changing the reuse setting."""
+        """Apply the restored checks and retain the original recommendation."""
         self.loaded_selection = selection
-        self.refined_review = None
-        self.can_export_refined = False
+        self.refined_review = selection.refined_report
+        self.can_export_refined = selection.can_export_refined
         self.recommended = set(selection.recommended)
         for index, (_, _, marker) in enumerate(self.photo_rows):
             marker.configure(text="Recommended" if index in self.recommended else "")
-        self.restore_recommendations()
+        checks: frozenset[int] = (
+            selection.recommended
+            if selection.restored_checks is None
+            else selection.restored_checks
+        )
+        for index, checked in enumerate(self.photo_checks):
+            checked.set(index in checks)
+        self.selection_changed()
 
     def load_rules(self) -> None:
         """Choose or clear a JSON file with photo inclusion rules."""
@@ -953,6 +1024,10 @@ class Launcher:
             state="normal" if active_review else "disabled"
         )
         selected: list[int] = self.checked_photos()
+        self.overview_button.configure(state="normal" if active_review else "disabled")
+        self.dense_overview_button.configure(
+            state="normal" if active_review and colmap_ready else "disabled"
+        )
         self.selection_count.set(
             f"{len(selected)} of {len(self.photos)} photos selected"
         )
@@ -1098,6 +1173,70 @@ class Launcher:
                     ],
                     "Exporting drafts",
                 )
+
+    def start_dense_overview(self) -> None:
+        """Choose a reference and request a dense overview for its section."""
+        if self.process or self.loaded_selection is None or not self.photos:
+            return
+        checked: list[int] = self.checked_photos()
+        names: list[str] = [photo.name for photo in self.photos]
+        default: str = names[checked[0]] if checked else names[0]
+        dialog: DenseReferenceDialog = DenseReferenceDialog(self.root, names, default)
+        if dialog.result:
+            self.start_overview(dense_focus=dialog.result)
+
+    def start_overview(self, *, dense_focus: str | None = None) -> None:
+        """Open a fresh overview of the current checks using saved alignment."""
+        selection: SavedSelection | None = self.loaded_selection
+        checked: list[int] = self.checked_photos()
+        if self.folder is None or selection is None or self.process:
+            return
+        checkpoint: Path | None = None
+        reused: str = self.reuse.get()
+        for candidate in (selection.run, Path(reused) if reused else None):
+            if candidate is not None:
+                try:
+                    match_assets(read_json(candidate), candidate)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                checkpoint = candidate
+                break
+        if checkpoint is None:
+            self.fail(
+                ValueError(
+                    "Choose the saved matches for this survey or run Analyze photos."
+                )
+            )
+            return
+        try:
+            jobs: Path = Path(self.job_dir.get()).resolve()
+            jobs.mkdir(parents=True, exist_ok=True)
+            job: Path = Path(tempfile.mkdtemp(prefix="survey-overview-", dir=jobs))
+            request: Path = job / "overview-input.json"
+            refined: Path | None = (
+                self.refined_review.with_suffix(".json")
+                if self.refined_review is not None
+                else None
+            )
+            data: dict[str, Any] = {
+                "folder": str(self.folder),
+                "plan": str(selection.plan),
+                "digest": selection.digest,
+                "checkpoint": str(checkpoint),
+                "photos": [photo.name for photo in self.photos],
+                "checked": [self.photos[index].name for index in checked],
+                "colmap": str(self.colmap_path) if self.colmap_path else None,
+                "refined": str(refined) if refined else None,
+                "dense_focus": dense_focus,
+            }
+            request.write_text(json.dumps(data), encoding="utf-8")
+        except OSError as error:
+            self.fail(error)
+            return
+        operation: str = (
+            "Building dense terrain" if dense_focus else "Building survey overview"
+        )
+        self.launch(["--survey-overview", str(request)], operation)
 
     def refine(self) -> None:
         """Run refinement with a snapshot of the checked original photos."""
@@ -1256,6 +1395,8 @@ class Launcher:
             "Testing GPU": "GPU test passed",
             "Exporting drafts": "Export complete",
             "Refining cutlines": "Refinement complete",
+            "Building survey overview": "Survey overview ready",
+            "Building dense terrain": "Dense terrain ready",
         }[self.operation]
         if code:
             status = (
@@ -1266,6 +1407,14 @@ class Launcher:
         try:
             if self.manifest is not None and self.manifest.is_file():
                 result: dict[str, Any] = read_json(self.manifest)
+                if not code and self.operation in {
+                    "Building survey overview",
+                    "Building dense terrain",
+                }:
+                    overview: Path = Path(result["overview_report"])
+                    self.open_path(overview)
+                    if result.get("alignment") in {"cached", "existing"}:
+                        status += " · Saved alignment reused"
                 device: str | None = result.get("device_used")
                 if device:
                     status += f" · {'Saved matches' if result.get('run_mode') == 'reused' else 'Matching'} on {device.upper()}"

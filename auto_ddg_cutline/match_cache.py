@@ -93,6 +93,42 @@ def legacy_checkpoint(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
     }
 
 
+def match_assets(source: dict[str, Any], path: Path) -> MatchAssets:
+    """Resolve a saved database and its staged image folder.
+
+    Args:
+        source: Saved run manifest.
+        path: Path to the manifest, used to locate intact moved jobs.
+
+    Returns:
+        The matching assets and recorded settings, before photo validation.
+    """
+    if source.get("backend") != "colmap":
+        raise ValueError("Select a COLMAP run.json.")
+    checkpoint: dict[str, Any] = source.get("match_checkpoint") or legacy_checkpoint(
+        source, path
+    )
+    device: str = checkpoint["device"]
+    if device not in {"gpu", "cpu"}:
+        raise ValueError("Saved matching device is invalid.")
+    database: Path = Path(checkpoint["database"])
+    image_folder: Path = Path(checkpoint["image_folder"])
+    if not source.get("match_reuse"):
+        # Prefer the files alongside the manifest for an intact moved run.
+        if (path.parent / device / "database.db").is_file():
+            database = path.parent / device / "database.db"
+        if (path.parent / "images").is_dir():
+            image_folder = path.parent / "images"
+    if not database.is_file():
+        raise ValueError(f"Saved match database is missing: {database}")
+    return MatchAssets(
+        database.resolve(),
+        image_folder.resolve(),
+        cast(ComputeDevice, device),
+        checkpoint["settings"],
+    )
+
+
 def load_matches(
     manifest_path: Path, selected: list[Path], report: RunReport
 ) -> tuple[MatchAssets, dict[str, Photo]]:
@@ -113,25 +149,9 @@ def load_matches(
     path: Path = manifest_path.resolve()
     try:
         source: dict[str, Any] = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(source, dict) or source.get("backend") != "colmap":
+        if not isinstance(source, dict):
             raise ValueError("Select a COLMAP run.json.")
-        checkpoint: dict[str, Any] = source.get(
-            "match_checkpoint"
-        ) or legacy_checkpoint(source, path)
-        device: str = checkpoint["device"]
-        if device not in {"gpu", "cpu"}:
-            raise ValueError("Saved matching device is invalid.")
-        database: Path = Path(checkpoint["database"])
-        image_folder: Path = Path(checkpoint["image_folder"])
-        if not source.get("match_reuse"):
-            # Prefer the files alongside the manifest for an intact moved run.
-            if (path.parent / device / "database.db").is_file():
-                database = path.parent / device / "database.db"
-            if (path.parent / "images").is_dir():
-                image_folder = path.parent / "images"
-        if not database.is_file():
-            raise ValueError(f"Saved match database is missing: {database}")
-        database = database.resolve()
+        assets: MatchAssets = match_assets(source, path)
         rows: list[dict[str, Any]] = source["images"]
         if [row["name"] for row in rows] != [photo.name for photo in selected]:
             raise ValueError(
@@ -141,15 +161,15 @@ def load_matches(
         for index, (row, original) in enumerate(
             zip(rows, selected, strict=True), start=1
         ):
-            photo: Photo = validate_photo(row, original, image_folder, index)
+            photo: Photo = validate_photo(row, original, assets.image_folder, index)
             photos[photo.staged_name] = photo
             report.update(
                 f"validated {original.name}" if report.verbose else "photos validated",
                 index,
                 len(selected),
             )
-        validate_database(database, photos)
-        verified: list[VerifiedPair] = verified_pairs(database, photos)
+        validate_database(assets.database, photos)
+        verified: list[VerifiedPair] = verified_pairs(assets.database, photos)
         if not any(item["inliers"] >= MIN_CUTLINE_MATCHES for item in verified):
             raise ValueError("The saved database has no usable verified matches.")
         if (
@@ -159,16 +179,7 @@ def load_matches(
             raise ValueError(
                 "Verified pairs in the database differ from the saved run."
             )
-        settings: dict[str, Any] = checkpoint["settings"]
-        return (
-            MatchAssets(
-                database.resolve(),
-                image_folder.resolve(),
-                cast(ComputeDevice, device),
-                settings,
-            ),
-            photos,
-        )
+        return assets, photos
     except (
         KeyError,
         TypeError,

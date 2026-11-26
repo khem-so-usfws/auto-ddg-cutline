@@ -80,6 +80,7 @@ class Track:
     xyz: Coordinates
     error: float
     views: frozenset[int]
+    color: tuple[int, int, int] = (139, 167, 169)
 
 
 @dataclass(frozen=True)
@@ -266,9 +267,14 @@ def read_model(folder: Path, photos: dict[str, Photo]) -> Model:
         parts = record.split()
         if len(parts) < 8 or (len(parts) - 8) % 2:
             raise ValueError("COLMAP points3D.txt contains an incomplete track.")
+        red: int
+        green: int
+        blue: int
+        red, green, blue = map(int, parts[4:7])
         tracks[int(parts[0])] = Track(
             np.array(list(map(float, parts[1:4]))),
             float(parts[7]),
             frozenset(map(int, parts[8::2])),
+            (red, green, blue),
         )
     return Model(folder.name, views, tracks)

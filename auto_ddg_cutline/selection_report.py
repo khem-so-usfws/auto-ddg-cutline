@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 from .geometry import Frame
 from .paired import IndexPair
 from .selection_evidence import GRID_COLS, GRID_ROWS, SHARPER_ALTERNATE_RATIO
+from .survey_viewer import SURVEY_OVERVIEW_NAME, ensure_overview_entry
 
 STYLE: str = """
 body { margin: 0 auto; padding: 1.5rem; max-width: 85rem; color: #172c33;
@@ -516,6 +517,10 @@ def write_selection_report(
             f"{protected} views kept for distinct terrain, section coverage or analyst pins. "
             f'<a href="#compact-evidence">See what the compact set covers</a>.</p>'
         )
+    overview_link: str = ""
+    if not refined:
+        ensure_overview_entry(job)
+        overview_link = f'<a href="{SURVEY_OVERVIEW_NAME}">Survey Overview</a>'
     body: list[str] = [
         f"<h1>{heading}</h1>",
         f"<p><strong>{len(proposed)} {source} of {len(rows)} photos</strong> "
@@ -525,7 +530,7 @@ def write_selection_report(
         '<nav><a href="#overlaps">Paired cutlines</a><a href="#review">Review flags</a>'
         '<a href="#sections">Counting set</a><a href="#omissions">Omitted photos</a>'
         '<a href="#local">Local SfM</a><a href="selection-plan.json">Plan JSON</a>'
-        f"{pilot_link}</nav>",
+        f"{overview_link}{pilot_link}</nav>",
         '<h2 id="overlaps">Paired cutlines</h2>',
     ]
     if draft_cards:

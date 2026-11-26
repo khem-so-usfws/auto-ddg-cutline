@@ -58,6 +58,9 @@ COLMAP_STAGES: dict[str, str] = {
     "exhaustive_matcher": "matching_and_verification",
     "mapper": "sparse_reconstruction",
     "model_converter": "model_conversion",
+    "image_deleter": "dense_select_views",
+    "image_undistorter": "dense_undistort",
+    "patch_match_stereo": "dense_stereo",
 }
 PROCESSED: re.Pattern[str] = re.compile(r"Processed file \[(\d+)/(\d+)\]")
 

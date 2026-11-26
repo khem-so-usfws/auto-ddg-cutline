@@ -33,7 +33,7 @@ Open a 64-bit Windows Anaconda Prompt in the companion repo. The release ZIP con
 ```bat
 conda activate auto-ddg-cutline
 python -m pip install -r requirements-release.txt
-build_windows.bat --version 0.1.5
+build_windows.bat --version 0.1.6-overview.4
 ```
 
 The batch script runs the tests, checks the packaged launcher and worker, then creates the ZIP and checksum under `dist\releases`. Use `--output-dir "C:\Temp\cutline-releases"` to choose another location.
@@ -49,7 +49,19 @@ To keep a bird group together, draw a loose polygon around the group in DDG afte
 
 Use **Advanced** to choose saved matches, enable local SfM during the initial analysis, change the output folder, or configure benchmarking. **Open run logs** opens the folder containing the saved manifest and COLMAP logs. The packaged launcher shows the release version in its title bar.
 
-To resume a recommendation, choose the photo folder and click **Load previous selection…** above the table. Open the previous **Analyze photos** job's `run.json` or its `selection-plan.json`. The saved set restores the checkboxes and becomes the source for **Reset to recommended photos**. A standalone selection-plan JSON works for restoring and refining the saved photos. Retain the original job files to reopen its HTML report or export its draft cutlines.
+To resume, choose the photo folder and click **Load previous selection…** above the table. An **Analyze photos** `run.json` or `selection-plan.json` restores the recommendation. A `tier2-selection.json` from a refinement workspace restores the analyst's exact checks and reopens the refined review when the completed job is still alongside it. If the original analysis plan moved, choose that exact file when prompted. **Reset to recommended photos** returns to the original software picks.
+
+### Survey Overview
+
+After **Analyze photos**, click **Update Survey Overview**. The default **Photos around the island** view groups real thumbnails by approximate camera direction. Select a **Focus photo** to highlight verified overlaps, then choose a neighbor to see both photos side by side. The **Survey Overview** link in the draft review opens the same report. Use **Checked photos** or **All photos** to switch between the counting set and the whole survey. Unregistered photos are flagged in the list. The overview works offline in a browser with Canvas support.
+
+Change the checkboxes and click **Update Survey Overview** again to refresh the same HTML report next to the analysis plan. The overview reuses the cached alignment and terrain patches while the matching workspace and source photos are unchanged. After **Refine cutlines**, update the overview to see the refined handoffs. Keep the analysis job, including its staged images and verified match database, to use the overview again.
+
+Switch to **Terrain (3D)** to inspect the geometry. Drag to rotate and scroll to zoom. Select **Photo A** and **Photo B** to compare their supported footprints. Cyan and pink show the two views, and gold shows shared support. Holes in the coarse surface mark areas with insufficient support. Turn off **Terrain** to see the sparse landmarks. Click a cutline to open the paired photo review and confirm the cutline and count sides. Use the reconstruction block picker when photos register in separate coordinate systems.
+
+Turn on **Camera frustums** to see where the registered cameras were pointing and the angular extent of each photo. The toggle starts off, and the frustums follow the **All photos** or **Checked photos** filter. Use **Photo A** and **Photo B** to highlight their frustums in cyan and pink. Use the colored patches on the terrain to see supported overlap.
+
+To try the dense terrain pilot, click **Build dense terrain…** in the launcher and pick a registered photo of the section you want to inspect. The reference needs at least two other registered views with shared tracks in the same block. This step requires the CUDA build of COLMAP and an NVIDIA GPU. It uses the saved camera poses, up to eight views, and a 1,400-pixel long edge to make a photo-colored surface for the reference area. The report opens with **Dense terrain** selected. Switch to **Sparse terrain** for the whole block. The dense layer displays footprints and cutline stretches with depth support in that section. The paired photo review and DDG export still use the original pixel coordinates and saved cutlines. **Update Survey Overview** reuses a successful dense pilot with your current photo checks.
 
 Choose **Auto** for GPU matching with visible CPU fallback. **NVIDIA GPU** runs the matching stages on the GPU alone. **CPU** uses CPU matching. The report and run logs let you check the result, and the status line shows which device supplied the matches. Local SfM uses the CPU mapper. Use a CUDA build with **Test GPU** on the workstation that will run the analysis.
 
